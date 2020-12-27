@@ -1,4 +1,5 @@
 # Based on https://github.com/DazWilkin/do-apps-rust
+# god help me
 FROM rustlang/rust:nightly-slim as builder
 
 RUN USER=root cargo new --bin mimc-fast
