@@ -1,17 +1,39 @@
-# Use the official Rust image.
-# https://hub.docker.com/_/rust
-FROM rust:1.27.0
+# Based on https://github.com/DazWilkin/do-apps-rust
+FROM rustlang/rust:nightly-slim as builder
 
-# Copy local code to the container image.
-WORKDIR /usr/src/app
-COPY . .
+RUN USER=root cargo new --bin mimc-fast
 
-# Install production dependencies and build a release artifact.
-RUN cargo install
+WORKDIR /mimc-fast
 
-# Service must listen to $PORT environment variable.
-# This default value facilitates local development.
-ENV PORT 8080
+COPY ./Cargo.toml ./Cargo.toml
+RUN cargo build --release
+RUN rm src/*.rs
 
-# Run the web service on container startup.
-CMD ["hellorust"]
+ADD . ./
+
+RUN rm ./target/release/deps/mimc_fast*
+
+RUN cargo build --release
+
+
+FROM debian:buster-slim as runtime
+
+WORKDIR /bin
+
+# Copy from builder and rename to 'server'
+COPY --from=builder /mimc-fast/target/release/mimc-fast ./server
+
+RUN apt-get update \
+    && apt-get install -y ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV TZ=Etc/UTC \
+    USER=appuser
+
+RUN groupadd ${USER} \
+    && useradd -g ${USER} ${USER} && \
+    chown -R ${USER}:${USER} /bin
+
+USER ${USER}
+
+ENTRYPOINT ["./server"]
