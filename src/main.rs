@@ -6,20 +6,30 @@ extern crate rocket;
 #[macro_use]
 extern crate lazy_static;
 
-use bigint::U512;
+use uint::construct_uint;
+construct_uint! {
+    pub struct U512(8);
+}
+use itertools::iproduct;
+use std::ops::Div;
+use std::ops::Rem;
 
-use serde::{Serialize, Deserialize};
 use rocket_contrib::json::Json;
+use serde::{Deserialize, Serialize};
 
 use rayon::prelude::*;
 
 use rocket::http::Method;
-use rocket_cors::{AllowedHeaders, AllowedOrigins, catch_all_options_routes};
+use rocket_cors::{catch_all_options_routes, AllowedHeaders, AllowedOrigins};
+
+static KEY: u32 = 7;
 
 lazy_static! {
-    static ref P: U512 = U512::from_dec_str("21888242871839275222246405745257275088548364400416034343698204186575808495617").unwrap();
+    static ref P: U512 = U512::from_dec_str(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617"
+    )
+    .unwrap();
     static ref C: Vec<PrimeElem> = {
-
         let consts = vec![
             "0",
             "7120861356467848435263064379192047478074060781135320967663101236819528304084",
@@ -242,9 +252,12 @@ lazy_static! {
             "2119542016932434047340813757208803962484943912710204325088879681995922344971",
             "0",
         ];
-        consts.into_iter().map(|c| PrimeElem { x: U512::from_dec_str(c).unwrap() })
+        consts
+            .into_iter()
+            .map(|c| PrimeElem {
+                x: U512::from_dec_str(c).unwrap(),
+            })
             .collect::<Vec<_>>()
-
     };
 }
 
@@ -257,15 +270,14 @@ impl PrimeElem {
     fn plus(&self, rhs: &PrimeElem) -> PrimeElem {
         let (sum, overflowed) = self.x.overflowing_add(rhs.x);
         assert!(!overflowed);
-        let (res, overflowed) = sum.overflowing_rem(*P);
-        assert!(!overflowed);
+        let res = sum.rem(*P);
         PrimeElem { x: res }
     }
 
     fn times(&self, rhs: &PrimeElem) -> PrimeElem {
         let (prod, overflowed) = self.x.overflowing_mul(rhs.x);
         assert!(!overflowed);
-        let (res, overflowed) = prod.overflowing_rem(*P);
+        let res = prod.rem(*P);
         assert!(!overflowed);
         PrimeElem { x: res }
     }
@@ -315,19 +327,21 @@ impl MimcState {
     }
 
     fn sponge(inputs: Vec<i64>, n_outputs: usize, rounds: usize) -> Vec<PrimeElem> {
-        let inputs = inputs.into_iter()
+        let inputs = inputs
+            .into_iter()
             .map(|x| {
                 let bigx = if x < 0 {
-                    let (diff, overflowed) = P.overflowing_sub(
-                        U512::from_big_endian(&((-x).to_be_bytes())));
+                    let (diff, overflowed) =
+                        P.overflowing_sub(U512::from_big_endian(&((-x).to_be_bytes())));
                     assert!(!overflowed);
                     diff
                 } else {
                     U512::from_big_endian(&x.to_be_bytes())
                 };
                 PrimeElem { x: bigx }
-            }).collect::<Vec<_>>();
-        let mut state = MimcState::new(rounds, PrimeElem::zero());
+            })
+            .collect::<Vec<_>>();
+        let mut state = MimcState::new(rounds, PrimeElem { x: U512::from(KEY) });
         for elt in inputs {
             state.inject(&elt);
             state.mix();
@@ -380,22 +394,22 @@ fn mine(task: Json<Task>) -> Json<Response> {
     let y = task.chunkFootprint.bottomLeft.y;
     let size = task.chunkFootprint.sideLength;
 
-    let (threshold, overflowed) = P.overflowing_div(U512::from(task.planetRarity));
-    assert!(!overflowed);
+    let threshold = P.div(U512::from(task.planetRarity));
 
-    let planets = (x..(x + size)).into_par_iter().map(|xi| {
-        let mut planets = Vec::new();
-        for yi in y..(y + size) {
+    let planets = iproduct!(x..(x + size), y..(y + size))
+        .par_bridge()
+        .filter_map(|(xi, yi)| {
             let hash = MimcState::sponge(vec![xi, yi], 1, 220)[0].x;
             if hash < threshold {
-                planets.push(Planet {
+                Some(Planet {
                     coords: Coords { x: xi, y: yi },
                     hash: hash.to_string(),
-                });
+                })
+            } else {
+                None
             }
-        }
-        planets
-    }).flatten().collect::<Vec<_>>();
+        })
+        .collect::<Vec<Planet>>();
 
     Json(Response {
         chunkFootprint: task.chunkFootprint.clone(),
@@ -420,8 +434,14 @@ fn main() {
         allow_credentials: true,
         ..Default::default()
     }
-    .to_cors().unwrap();
+    .to_cors()
+    .unwrap();
     let options_routes = catch_all_options_routes();
 
-    rocket::ignite().mount("/", routes![mine]).mount("/", options_routes).manage(cors.clone()).attach(cors).launch();
+    rocket::ignite()
+        .mount("/", routes![mine])
+        .mount("/", options_routes)
+        .manage(cors.clone())
+        .attach(cors)
+        .launch();
 }
