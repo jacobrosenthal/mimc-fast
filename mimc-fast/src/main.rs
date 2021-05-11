@@ -1,60 +1,79 @@
+#![feature(proc_macro_hygiene, decl_macro)]
+
+#[macro_use]
+extern crate rocket;
+
 use darkforest::{mimc, threshold, ChunkFootprint, Coords, Planet};
-use http_types::headers::HeaderValue;
 use itertools::iproduct;
 use rayon::prelude::*;
+use rocket::config::{Config, ConfigError, Environment};
+use rocket::http::Method;
+use rocket_contrib::json::Json;
+use rocket_cors::{catch_all_options_routes, AllowedHeaders, AllowedOrigins};
 use serde::{Deserialize, Serialize};
-use tide::security::{CorsMiddleware, Origin};
-use tide::{Body, Request};
+use std::env;
 
-#[async_std::main]
-async fn main() -> tide::Result<()> {
-    let cors = CorsMiddleware::new()
-        .allow_methods("GET, POST, OPTIONS".parse::<HeaderValue>().unwrap())
-        .allow_origin(Origin::from("*"))
-        .allow_credentials(false);
+#[post("/mine", data = "<task>")]
+fn mine(task: Json<Task>) -> Json<Response> {
+    let x = task.chunkFootprint.bottomLeft.x;
+    let y = task.chunkFootprint.bottomLeft.y;
+    let size = task.chunkFootprint.sideLength;
+    let key = task.planetHashKey;
+    let rarity = task.planetRarity;
 
-    let mut app = tide::new();
-    app.with(cors);
+    let threshold = threshold(rarity);
 
-    app.at("/mine").post(|mut req: Request<()>| async move {
-        #[allow(non_snake_case)]
-        let Task {
-            chunkFootprint,
-            planetHashKey,
-            planetRarity,
-        } = req.body_json().await?;
+    let planets = iproduct!(x..(x + size), y..(y + size))
+        .par_bridge()
+        .filter_map(|(xi, yi)| {
+            let hash = mimc(xi, yi, key);
+            if hash < threshold {
+                Some(Planet {
+                    coords: Coords { x: xi, y: yi },
+                    hash: hash.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<Planet>>();
 
-        let x = chunkFootprint.bottomLeft.x;
-        let y = chunkFootprint.bottomLeft.y;
-        let size = chunkFootprint.sideLength;
-        let key = planetHashKey;
+    Json(Response {
+        chunkFootprint: task.chunkFootprint.clone(),
+        planetLocations: planets,
+    })
+}
 
-        let threshold = threshold(planetRarity);
+fn main() -> Result<(), ConfigError> {
+    let key = "PORT";
+    let port: u16 = match env::var(key) {
+        Ok(val) => val.parse::<u16>().unwrap(),
+        Err(_) => 8000,
+    };
 
-        let planets = iproduct!(x..(x + size), y..(y + size))
-            .par_bridge()
-            .filter_map(|(xi, yi)| {
-                let hash = mimc(xi, yi, key);
-                if hash < threshold {
-                    Some(Planet {
-                        coords: Coords { x: xi, y: yi },
-                        hash: hash.to_string(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<Planet>>();
+    let allowed_origins = AllowedOrigins::all();
+    let cors = rocket_cors::CorsOptions {
+        allowed_origins,
+        allowed_methods: vec![Method::Post].into_iter().map(From::from).collect(),
+        allowed_headers: AllowedHeaders::all(),
+        allow_credentials: true,
+        ..Default::default()
+    }
+    .to_cors()
+    .unwrap();
+    let options_routes = catch_all_options_routes();
 
-        let rsp = Response {
-            chunkFootprint,
-            planetLocations: planets,
-        };
+    let config = Config::build(Environment::Staging)
+        .address("0.0.0.0")
+        .port(port)
+        .finalize()?;
 
-        Body::from_json(&rsp)
-    });
-
-    app.listen("127.0.0.1:8000").await?;
+    rocket::custom(config)
+        .mount("/", routes![mine])
+        .mount("/", options_routes)
+        .manage(cors.clone())
+        .attach(cors)
+        .launch();
 
     Ok(())
 }
